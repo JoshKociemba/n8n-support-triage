@@ -1,2 +1,4 @@
 .env
 *.backup
+.DS_Store
+.plain-webhook-state.json
