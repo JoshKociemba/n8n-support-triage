@@ -34,8 +34,9 @@ Import `workflows/plain-support-triage.json` as a separate workflow. It checks P
 3. In n8n, create a **Header Auth** credential named `Plain test workspace`. Set its header name to `Authorization` and its value to `Bearer YOUR_PLAIN_API_KEY`. Enter the actual key only in the credential editor, never in workflow JSON or Git.
 4. Select that same credential in both **Fetch recent Plain threads** and **Add Plain triage event**.
 5. Create a synthetic ticket in your Plain workspace with a subject like `API request fails after credential rotation` and a description or customer message containing `401 Unauthorized`.
-6. Click **Execute workflow** once. Confirm a `Support triage — rules-v1` event appears on the Plain thread. Run it again to confirm it skips the processed thread.
-7. Publish/activate the workflow to enable its one-minute schedule.
+6. If you used Plain's onboarding **test thread**, open **Plain connection settings** and set `testThreadId` to its `th_...` ID (copy it with ⌘K → Copy thread ID). Plain excludes onboarding test threads from its thread list, so this optional setting fetches that thread directly. Leave it empty for normal threads.
+7. Click **Execute workflow** once. Confirm a `Support triage — rules-v1` event appears on the Plain thread. Run it again to confirm it skips the processed thread.
+8. Publish/activate the workflow to enable its one-minute schedule.
 
 The event includes category, evidence, investigation steps, escalation context, and a reply draft for review. It does not send a customer reply or change ticket priority, assignment, or status. Customer impact cannot be inferred from Plain priority; the event explicitly calls out the single-user default.
 

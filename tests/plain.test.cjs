@@ -22,6 +22,12 @@ test('skips completed threads and empty workspaces', () => {
   assert.deepEqual(preparePlainThreads(response({ ...thread, triageEvents: { edges: [{ node: { entry: { externalId: 'n8n-support-triage:rules-v1:th_demo' } } }] } })), []);
   assert.deepEqual(preparePlainThreads({ data: { threads: { edges: [], pageInfo: { hasNextPage: false } } } }), []);
 });
+test('includes a directly queried onboarding test thread without duplicating it', () => {
+  const data = { threads: { edges: [], pageInfo: {hasNextPage: false} }, testThread: thread };
+  assert.equal(preparePlainThreads({data}).length, 1);
+  data.threads.edges = [{node: thread}];
+  assert.equal(preparePlainThreads({data}).length, 1);
+});
 test('reports query failures and overflow instead of losing tickets', () => {
   assert.throws(() => preparePlainThreads({ errors: [{ message: 'Unauthorized' }] }), /Unauthorized/);
   assert.throws(() => preparePlainThreads({ data: { threads: { edges: [], pageInfo: { hasNextPage: true } } } }), /100 threads/);

@@ -16,14 +16,15 @@ const http = (id, name, x, jsonBody) => ({
 const nodes = [
   { id: 'manual', name: 'Test now', position: [0, -100], type: 'n8n-nodes-base.manualTrigger', typeVersion: 1, parameters: {} },
   { id: 'schedule', name: 'Every minute', position: [0, 100], type: 'n8n-nodes-base.scheduleTrigger', typeVersion: 1.2, parameters: { rule: { interval: [{ field: 'minutes', minutesInterval: 1 }] } } },
-  http('fetch', 'Fetch recent Plain threads', 260, '={{ { query: ' + JSON.stringify(THREADS_QUERY) + ', variables: { since: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() } } }}'),
+  code('config', 'Plain connection settings', 130, "// Optional: paste a Plain onboarding test thread ID here. Regular threads are discovered automatically.\nreturn [{json: {testThreadId: ''}}];"),
+  http('fetch', 'Fetch recent Plain threads', 260, '={{ { query: ' + JSON.stringify(THREADS_QUERY) + ', variables: { since: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), testThreadId: $json.testThreadId || "th_unused", includeTestThread: Boolean($json.testThreadId) } } }}'),
   code('prepare', 'Skip processed threads', 520, `${preparePlainThreads.toString()}\nreturn preparePlainThreads($input.first().json).map(json => ({json}));`),
   code('triage', 'Triage and build internal event', 780, `const CREATE_EVENT = ${JSON.stringify(CREATE_EVENT)};\n${triage.toString()}\n${buildPlainEvent.toString()}\nreturn $input.all().map(item => ({json: buildPlainEvent(item.json, triage(item.json.ticket))}));`),
   http('write', 'Add Plain triage event', 1040, '={{ $json }}'),
   code('check', 'Confirm write succeeded', 1300, `${checkPlainWrite.toString()}\nreturn $input.all().map(item => ({json: checkPlainWrite(item.json)}));`),
 ];
 const connections = {};
-for (const [from, to] of [['Test now', 'Fetch recent Plain threads'], ['Every minute', 'Fetch recent Plain threads'], ['Fetch recent Plain threads', 'Skip processed threads'], ['Skip processed threads', 'Triage and build internal event'], ['Triage and build internal event', 'Add Plain triage event'], ['Add Plain triage event', 'Confirm write succeeded']]) {
+for (const [from, to] of [['Test now', 'Plain connection settings'], ['Every minute', 'Plain connection settings'], ['Plain connection settings', 'Fetch recent Plain threads'], ['Fetch recent Plain threads', 'Skip processed threads'], ['Skip processed threads', 'Triage and build internal event'], ['Triage and build internal event', 'Add Plain triage event'], ['Add Plain triage event', 'Confirm write succeeded']]) {
   connections[from] = { main: [[{ node: to, type: 'main', index: 0 }]] };
 }
 const workflow = { name: 'Plain support triage — automatic local demo', active: false, nodes, connections, settings: { executionOrder: 'v1' } };

@@ -34,6 +34,20 @@
       }
     },
     {
+      "id": "config",
+      "name": "Plain connection settings",
+      "position": [
+        130,
+        0
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Optional: paste a Plain onboarding test thread ID here. Regular threads are discovered automatically.\nreturn [{json: {testThreadId: ''}}];"
+      }
+    },
+    {
       "id": "fetch",
       "name": "Fetch recent Plain threads",
       "position": [
@@ -49,7 +63,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { query: \"query SupportTriageThreads($since: String!) {\\n  threads(first: 100, filters: {createdAt: {after: $since}, isMarkedAsSpam: false}, sortBy: {field: CREATED_AT, direction: ASC}) {\\n    pageInfo { hasNextPage }\\n    edges { node {\\n      id title description previewText\\n      messages: timelineEntries(first: 20, filters: {isMessage: true}) {\\n        pageInfo { hasNextPage }\\n        edges { node { llmText actor { __typename } } }\\n      }\\n      triageEvents: timelineEntries(first: 100, filters: {entryTypes: [THREAD_EVENT]}) {\\n        pageInfo { hasNextPage }\\n        edges { node { entry { ... on ThreadEventEntry { externalId } } } }\\n      }\\n    } }\\n  }\\n}\", variables: { since: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() } } }}",
+        "jsonBody": "={{ { query: \"query SupportTriageThreads($since: String!, $testThreadId: ID! = \\\"th_unused\\\", $includeTestThread: Boolean! = false) {\\n  testThread: thread(threadId: $testThreadId) @include(if: $includeTestThread) { \\n      id title description previewText\\n      messages: timelineEntries(first: 20, filters: {isMessage: true}) {\\n        pageInfo { hasNextPage }\\n        edges { node { llmText actor { __typename } } }\\n      }\\n      triageEvents: timelineEntries(first: 100, filters: {entryTypes: [THREAD_EVENT]}) {\\n        pageInfo { hasNextPage }\\n        edges { node { entry { ... on ThreadEventEntry { externalId } } } }\\n      } }\\n  threads(first: 100, filters: {createdAt: {after: $since}, isMarkedAsSpam: false}, sortBy: {field: CREATED_AT, direction: ASC}) {\\n    pageInfo { hasNextPage }\\n    edges { node {\\n      \\n      id title description previewText\\n      messages: timelineEntries(first: 20, filters: {isMessage: true}) {\\n        pageInfo { hasNextPage }\\n        edges { node { llmText actor { __typename } } }\\n      }\\n      triageEvents: timelineEntries(first: 100, filters: {entryTypes: [THREAD_EVENT]}) {\\n        pageInfo { hasNextPage }\\n        edges { node { entry { ... on ThreadEventEntry { externalId } } } }\\n      }\\n    } }\\n  }\\n}\", variables: { since: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), testThreadId: $json.testThreadId || \"th_unused\", includeTestThread: Boolean($json.testThreadId) } } }}",
         "options": {
           "timeout": 30000,
           "batching": {
@@ -75,7 +89,7 @@
       "typeVersion": 2,
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "function preparePlainThreads(response) {\n  if (response.errors?.length) throw new Error('Plain query failed: ' + response.errors.map(e => e.message).join('; '));\n  const connection = response.data?.threads;\n  if (!connection?.edges) throw new Error('Plain returned no threads connection.');\n  if (connection.pageInfo?.hasNextPage) throw new Error('More than 100 threads in the 24-hour window. Add pagination before processing this volume.');\n  return connection.edges.flatMap(({ node: thread }) => {\n    const externalId = `n8n-support-triage:rules-v1:${thread.id}`;\n    if (thread.triageEvents?.pageInfo?.hasNextPage) throw new Error('Too many events to check deduplication for ' + thread.id);\n    if (thread.triageEvents?.edges?.some(e => e.node.entry.externalId === externalId)) return [];\n    const messages = (thread.messages?.edges || [])\n      .filter(e => e.node.actor?.__typename === 'CustomerActor')\n      .map(e => e.node.llmText).filter(Boolean);\n    const source = [thread.description, ...messages].filter(Boolean).join('\\n\\n') || thread.previewText || '';\n    const warnings = ['Customer impact is unknown; priority is a suggestion using the single-user default.'];\n    if (thread.messages?.pageInfo?.hasNextPage) warnings.push('Only the first 20 message entries were inspected.');\n    if (!messages.length) warnings.push('No customer message text was available; using thread description or preview.');\n    if (source.length > 10000) warnings.push('Source text was truncated to 10000 characters.');\n    return [{\n      threadId: thread.id, externalId, warnings,\n      ticket: { ticketId: thread.id, subject: thread.title.slice(0, 10000), description: source.slice(0, 10000) || 'No description provided.', logs: '', impact: 'single_user' },\n    }];\n  });\n}\nreturn preparePlainThreads($input.first().json).map(json => ({json}));"
+        "jsCode": "function preparePlainThreads(response) {\n  if (response.errors?.length) throw new Error('Plain query failed: ' + response.errors.map(e => e.message).join('; '));\n  const connection = response.data?.threads;\n  if (!connection?.edges) throw new Error('Plain returned no threads connection.');\n  if (connection.pageInfo?.hasNextPage) throw new Error('More than 100 threads in the 24-hour window. Add pagination before processing this volume.');\n  const edges = [...connection.edges];\n  if (response.data.testThread && !edges.some(e => e.node.id === response.data.testThread.id)) edges.push({node: response.data.testThread});\n  return edges.flatMap(({ node: thread }) => {\n    const externalId = `n8n-support-triage:rules-v1:${thread.id}`;\n    if (thread.triageEvents?.pageInfo?.hasNextPage) throw new Error('Too many events to check deduplication for ' + thread.id);\n    if (thread.triageEvents?.edges?.some(e => e.node.entry.externalId === externalId)) return [];\n    const messages = (thread.messages?.edges || [])\n      .filter(e => e.node.actor?.__typename === 'CustomerActor')\n      .map(e => e.node.llmText).filter(Boolean);\n    const source = [thread.description, ...messages].filter(Boolean).join('\\n\\n') || thread.previewText || '';\n    const warnings = ['Customer impact is unknown; priority is a suggestion using the single-user default.'];\n    if (thread.messages?.pageInfo?.hasNextPage) warnings.push('Only the first 20 message entries were inspected.');\n    if (!messages.length) warnings.push('No customer message text was available; using thread description or preview.');\n    if (source.length > 10000) warnings.push('Source text was truncated to 10000 characters.');\n    return [{\n      threadId: thread.id, externalId, warnings,\n      ticket: { ticketId: thread.id, subject: thread.title.slice(0, 10000), description: source.slice(0, 10000) || 'No description provided.', logs: '', impact: 'single_user' },\n    }];\n  });\n}\nreturn preparePlainThreads($input.first().json).map(json => ({json}));"
       }
     },
     {
@@ -143,7 +157,7 @@
       "main": [
         [
           {
-            "node": "Fetch recent Plain threads",
+            "node": "Plain connection settings",
             "type": "main",
             "index": 0
           }
@@ -151,6 +165,17 @@
       ]
     },
     "Every minute": {
+      "main": [
+        [
+          {
+            "node": "Plain connection settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plain connection settings": {
       "main": [
         [
           {

@@ -1,7 +1,4 @@
-const THREADS_QUERY = `query SupportTriageThreads($since: String!) {
-  threads(first: 100, filters: {createdAt: {after: $since}, isMarkedAsSpam: false}, sortBy: {field: CREATED_AT, direction: ASC}) {
-    pageInfo { hasNextPage }
-    edges { node {
+const THREAD_FIELDS = `
       id title description previewText
       messages: timelineEntries(first: 20, filters: {isMessage: true}) {
         pageInfo { hasNextPage }
@@ -10,7 +7,14 @@ const THREADS_QUERY = `query SupportTriageThreads($since: String!) {
       triageEvents: timelineEntries(first: 100, filters: {entryTypes: [THREAD_EVENT]}) {
         pageInfo { hasNextPage }
         edges { node { entry { ... on ThreadEventEntry { externalId } } } }
-      }
+      }`;
+
+const THREADS_QUERY = `query SupportTriageThreads($since: String!, $testThreadId: ID! = "th_unused", $includeTestThread: Boolean! = false) {
+  testThread: thread(threadId: $testThreadId) @include(if: $includeTestThread) { ${THREAD_FIELDS} }
+  threads(first: 100, filters: {createdAt: {after: $since}, isMarkedAsSpam: false}, sortBy: {field: CREATED_AT, direction: ASC}) {
+    pageInfo { hasNextPage }
+    edges { node {
+      ${THREAD_FIELDS}
     } }
   }
 }`;
@@ -27,7 +31,9 @@ function preparePlainThreads(response) {
   const connection = response.data?.threads;
   if (!connection?.edges) throw new Error('Plain returned no threads connection.');
   if (connection.pageInfo?.hasNextPage) throw new Error('More than 100 threads in the 24-hour window. Add pagination before processing this volume.');
-  return connection.edges.flatMap(({ node: thread }) => {
+  const edges = [...connection.edges];
+  if (response.data.testThread && !edges.some(e => e.node.id === response.data.testThread.id)) edges.push({node: response.data.testThread});
+  return edges.flatMap(({ node: thread }) => {
     const externalId = `n8n-support-triage:rules-v1:${thread.id}`;
     if (thread.triageEvents?.pageInfo?.hasNextPage) throw new Error('Too many events to check deduplication for ' + thread.id);
     if (thread.triageEvents?.edges?.some(e => e.node.entry.externalId === externalId)) return [];
