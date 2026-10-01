@@ -1,0 +1,212 @@
+{
+  "name": "Plain support triage — automatic local demo",
+  "active": false,
+  "nodes": [
+    {
+      "id": "manual",
+      "name": "Test now",
+      "position": [
+        0,
+        -100
+      ],
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "parameters": {}
+    },
+    {
+      "id": "schedule",
+      "name": "Every minute",
+      "position": [
+        0,
+        100
+      ],
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "fetch",
+      "name": "Fetch recent Plain threads",
+      "position": [
+        260,
+        0
+      ],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "https://core-api.uk.plain.com/graphql/v1",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { query: \"query SupportTriageThreads($since: String!) {\\n  threads(first: 100, filters: {createdAt: {after: $since}, isMarkedAsSpam: false}, sortBy: {field: CREATED_AT, direction: ASC}) {\\n    pageInfo { hasNextPage }\\n    edges { node {\\n      id title description previewText\\n      messages: timelineEntries(first: 20, filters: {isMessage: true}) {\\n        pageInfo { hasNextPage }\\n        edges { node { llmText actor { __typename } } }\\n      }\\n      triageEvents: timelineEntries(first: 100, filters: {entryTypes: [THREAD_EVENT]}) {\\n        pageInfo { hasNextPage }\\n        edges { node { entry { ... on ThreadEventEntry { externalId } } } }\\n      }\\n    } }\\n  }\\n}\", variables: { since: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() } } }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "prepare",
+      "name": "Skip processed threads",
+      "position": [
+        520,
+        0
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function preparePlainThreads(response) {\n  if (response.errors?.length) throw new Error('Plain query failed: ' + response.errors.map(e => e.message).join('; '));\n  const connection = response.data?.threads;\n  if (!connection?.edges) throw new Error('Plain returned no threads connection.');\n  if (connection.pageInfo?.hasNextPage) throw new Error('More than 100 threads in the 24-hour window. Add pagination before processing this volume.');\n  return connection.edges.flatMap(({ node: thread }) => {\n    const externalId = `n8n-support-triage:rules-v1:${thread.id}`;\n    if (thread.triageEvents?.pageInfo?.hasNextPage) throw new Error('Too many events to check deduplication for ' + thread.id);\n    if (thread.triageEvents?.edges?.some(e => e.node.entry.externalId === externalId)) return [];\n    const messages = (thread.messages?.edges || [])\n      .filter(e => e.node.actor?.__typename === 'CustomerActor')\n      .map(e => e.node.llmText).filter(Boolean);\n    const source = [thread.description, ...messages].filter(Boolean).join('\\n\\n') || thread.previewText || '';\n    const warnings = ['Customer impact is unknown; priority is a suggestion using the single-user default.'];\n    if (thread.messages?.pageInfo?.hasNextPage) warnings.push('Only the first 20 message entries were inspected.');\n    if (!messages.length) warnings.push('No customer message text was available; using thread description or preview.');\n    if (source.length > 10000) warnings.push('Source text was truncated to 10000 characters.');\n    return [{\n      threadId: thread.id, externalId, warnings,\n      ticket: { ticketId: thread.id, subject: thread.title.slice(0, 10000), description: source.slice(0, 10000) || 'No description provided.', logs: '', impact: 'single_user' },\n    }];\n  });\n}\nreturn preparePlainThreads($input.first().json).map(json => ({json}));"
+      }
+    },
+    {
+      "id": "triage",
+      "name": "Triage and build internal event",
+      "position": [
+        780,
+        0
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const CREATE_EVENT = \"mutation SupportTriageEvent($input: CreateThreadEventInput!) {\\n  createThreadEvent(input: $input) {\\n    threadEvent { id }\\n    error { code message }\\n  }\\n}\";\nfunction triage(body) {\n  const fail = (message) => ({ statusCode: 400, result: { error: message } });\n  if (!body || typeof body !== 'object' || Array.isArray(body)) return fail('Expected a JSON object.');\n  for (const field of ['ticketId', 'subject', 'description']) {\n    if (typeof body[field] !== 'string' || !body[field].trim()) return fail(`${field} must be a non-empty string.`);\n    if (body[field].length > 10000) return fail(`${field} exceeds 10000 characters.`);\n  }\n  if (body.logs !== undefined && typeof body.logs !== 'string') return fail('logs must be a string.');\n  if ((body.logs || '').length > 50000) return fail('logs exceeds 50000 characters.');\n  if (body.impact !== undefined && !['single_user', 'multiple_users', 'outage'].includes(body.impact)) {\n    return fail('impact must be single_user, multiple_users, or outage.');\n  }\n  // Best-effort redaction, not a guarantee. Use synthetic data for the demo.\n  const redact = (text) => text\n    .replace(/\\bBearer\\s+[^\\s,;\"']+/gi, 'Bearer [REDACTED]')\n    .replace(/\\b(api[_-]?key|token|password|secret)\\b([\"']?\\s*[:=]\\s*[\"']?)[^\\s,\"';}]+/gi, '$1$2[REDACTED]')\n    .replace(/\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b/gi, '[EMAIL REDACTED]');\n  const ticket = {\n    ticketId: redact(body.ticketId.trim()),\n    subject: redact(body.subject.trim()),\n    description: redact(body.description.trim()),\n    logs: redact(body.logs || ''),\n    impact: body.impact || 'single_user',\n  };\n  const rules = [\n    { category: 'authentication', pattern: /\\b401\\b|unauthorized|invalid credentials|invalid api key/i,\n      hypothesis: 'Credentials may be missing, invalid, or expired.',\n      steps: ['Confirm the configured credential is current without sharing its value.', 'Check the authentication header format and retry with a known working credential.'] },\n    { category: 'permissions', pattern: /\\b403\\b|forbidden|insufficient permissions/i,\n      hypothesis: 'The caller may lack access to the requested resource.',\n      steps: ['Check the credential scopes and resource permissions.', 'Compare the failing request with one that succeeds for the same account.'] },\n    { category: 'rate_limit', pattern: /\\b429\\b|rate.?limit|too many requests/i,\n      hypothesis: 'The service may be throttling requests.',\n      steps: ['Check Retry-After and the provider request limits.', 'Reduce concurrency and use bounded retries with backoff.'] },\n    { category: 'connectivity', pattern: /ETIMEDOUT|ECONNREFUSED|ENOTFOUND|connection refused|timed out/i,\n      hypothesis: 'DNS, network access, or upstream availability may be preventing the request.',\n      steps: ['Check the destination URL and service availability.', 'Test DNS and connectivity from the same environment as the failing workflow.'] },\n    { category: 'upstream_error', pattern: /\\b50[0234]\\b|bad gateway|service unavailable/i,\n      hypothesis: 'The upstream service may be failing or unavailable.',\n      steps: ['Check the upstream service status and request ID.', 'Retry only if the operation is safe to repeat; capture response headers and timestamps.'] },\n  ];\n  const source = `${ticket.subject}\\n${ticket.description}\\n${ticket.logs}`;\n  const matches = rules.filter(rule => rule.pattern.test(source));\n  const findings = matches.map(rule => ({\n    category: rule.category,\n    hypothesis: rule.hypothesis,\n    evidence: source.split('\\n').filter(line => rule.pattern.test(line)).slice(0, 3).map(line => line.slice(0, 500)),\n    nextSteps: rule.steps,\n  }));\n  const primary = findings[0];\n  const nextSteps = [...new Set(findings.flatMap(f => f.nextSteps))];\n  if (!primary) nextSteps.push('Request exact reproduction steps, expected behavior, actual behavior, and timestamp with timezone.', 'Collect a sanitized error message and execution ID.');\n  const priority = ticket.impact === 'outage' ? 'high' : ticket.impact === 'multiple_users' ? 'medium' : 'normal';\n  return { statusCode: 200, result: {\n    ticket,\n    category: primary?.category || 'needs_investigation',\n    priority,\n    method: 'rules-v1',\n    findings,\n    nextSteps,\n    requiresHumanReview: true,\n    escalationSummary: {\n      issue: ticket.subject,\n      reportedBehavior: ticket.description,\n      impact: ticket.impact,\n      hypotheses: findings.map(f => f.hypothesis),\n      missingInformation: ['Reproduction steps', 'Expected behavior', 'Affected version', 'Timestamp and execution ID'],\n      escalationRecommended: ticket.impact === 'outage',\n    },\n    customerReplyDraft: `Thanks for reporting this. ${primary ? 'The information provided contains signals related to ' + primary.category.replace(/_/g, ' ') + '. We need to verify the cause.' : 'We need a little more information to investigate.'} Please share the exact reproduction steps, the affected version, and the timestamp with timezone. Please remove credentials and personal information from any logs you send.`,\n  } };\n}\nfunction buildPlainEvent(item, triageResult) {\n  if (triageResult.statusCode !== 200) throw new Error('Ticket validation failed: ' + triageResult.result.error);\n  const r = triageResult.result;\n  const sections = [\n    `Support triage — rules-v1\\nCategory: ${r.category}\\nSuggested priority: ${r.priority}\\nHuman review required`,\n    'Input limitations\\n' + item.warnings.join('\\n'),\n    'Reported issue\\n' + r.ticket.subject + '\\n' + r.ticket.description,\n    'Findings\\n' + (r.findings.map(f => `${f.category}: ${f.hypothesis}\\nEvidence: ${f.evidence.join('\\n')}`).join('\\n\\n') || 'No known error pattern matched.'),\n    'Investigation steps\\n' + r.nextSteps.join('\\n'),\n    'Escalation summary\\n' + JSON.stringify(r.escalationSummary, null, 2),\n    'Customer reply draft — review before sending\\n' + r.customerReplyDraft,\n  ];\n  // Plain text avoids interpreting customer text as Markdown or mentions.\n  const components = sections.flatMap(text => {\n    const chunks = [];\n    for (let i = 0; i < text.length; i += 10000) chunks.push({ componentPlainText: { plainText: text.slice(i, i + 10000) } });\n    return chunks;\n  });\n  return { query: CREATE_EVENT, variables: { input: {\n    threadId: item.threadId, externalId: item.externalId,\n    title: 'Support triage — rules-v1', components,\n  } } };\n}\nreturn $input.all().map(item => ({json: buildPlainEvent(item.json, triage(item.json.ticket))}));"
+      }
+    },
+    {
+      "id": "write",
+      "name": "Add Plain triage event",
+      "position": [
+        1040,
+        0
+      ],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "parameters": {
+        "method": "POST",
+        "url": "https://core-api.uk.plain.com/graphql/v1",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 30000,
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "id": "check",
+      "name": "Confirm write succeeded",
+      "position": [
+        1300,
+        0
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "function checkPlainWrite(response) {\n  if (response.errors?.length) throw new Error('Plain mutation failed: ' + response.errors.map(e => e.message).join('; '));\n  const result = response.data?.createThreadEvent;\n  if (result?.error) throw new Error(`Plain write failed (${result.error.code}): ${result.error.message}`);\n  if (!result?.threadEvent?.id) throw new Error('Plain did not confirm event creation.');\n  return { status: 'triaged', eventId: result.threadEvent.id };\n}\nreturn $input.all().map(item => ({json: checkPlainWrite(item.json)}));"
+      }
+    }
+  ],
+  "connections": {
+    "Test now": {
+      "main": [
+        [
+          {
+            "node": "Fetch recent Plain threads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every minute": {
+      "main": [
+        [
+          {
+            "node": "Fetch recent Plain threads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch recent Plain threads": {
+      "main": [
+        [
+          {
+            "node": "Skip processed threads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip processed threads": {
+      "main": [
+        [
+          {
+            "node": "Triage and build internal event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triage and build internal event": {
+      "main": [
+        [
+          {
+            "node": "Add Plain triage event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add Plain triage event": {
+      "main": [
+        [
+          {
+            "node": "Confirm write succeeded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
