@@ -1,12 +1,12 @@
 const THREAD_FIELDS = `
-      id title description previewText
+      id title description previewText customer { id }
       messages: timelineEntries(first: 20, filters: {isMessage: true}) {
         pageInfo { hasNextPage }
         edges { node { llmText actor { __typename } } }
       }
-      triageEvents: timelineEntries(first: 100, filters: {entryTypes: [THREAD_EVENT]}) {
+      triageNotes: timelineEntries(first: 100, filters: {entryTypes: [NOTE]}) {
         pageInfo { hasNextPage }
-        edges { node { entry { ... on ThreadEventEntry { externalId } } } }
+        edges { node { actor { __typename } entry { ... on NoteEntry { noteId text } } } }
       }`;
 
 const THREADS_QUERY = `query SupportTriageThreads($since: String!, $testThreadId: ID! = "th_unused", $includeTestThread: Boolean! = false) {
@@ -19,9 +19,9 @@ const THREADS_QUERY = `query SupportTriageThreads($since: String!, $testThreadId
   }
 }`;
 
-const CREATE_EVENT = `mutation SupportTriageEvent($input: CreateThreadEventInput!) {
-  createThreadEvent(input: $input) {
-    threadEvent { id }
+const CREATE_NOTE = `mutation SupportTriageNote($input: CreateNoteInput!) {
+  createNote(input: $input) {
+    note { id }
     error { code message }
   }
 }`;
@@ -34,9 +34,10 @@ function preparePlainThreads(response) {
   const edges = [...connection.edges];
   if (response.data.testThread && !edges.some(e => e.node.id === response.data.testThread.id)) edges.push({node: response.data.testThread});
   return edges.flatMap(({ node: thread }) => {
-    const externalId = `n8n-support-triage:rules-v1:${thread.id}`;
-    if (thread.triageEvents?.pageInfo?.hasNextPage) throw new Error('Too many events to check deduplication for ' + thread.id);
-    if (thread.triageEvents?.edges?.some(e => e.node.entry.externalId === externalId)) return [];
+    const marker = `[n8n-support-triage:internal-notes-v1:${thread.id}]`;
+    if (thread.triageNotes?.pageInfo?.hasNextPage) throw new Error('Too many notes to check deduplication for ' + thread.id);
+    if (thread.triageNotes?.edges?.some(e => e.node.actor?.__typename === 'MachineUserActor' && e.node.entry.text?.startsWith(marker + '\n'))) return [];
+    if (!thread.customer?.id) throw new Error('Missing customer ID for ' + thread.id);
     const messages = (thread.messages?.edges || [])
       .filter(e => e.node.actor?.__typename === 'CustomerActor')
       .map(e => e.node.llmText).filter(Boolean);
@@ -46,17 +47,18 @@ function preparePlainThreads(response) {
     if (!messages.length) warnings.push('No customer message text was available; using thread description or preview.');
     if (source.length > 10000) warnings.push('Source text was truncated to 10000 characters.');
     return [{
-      threadId: thread.id, externalId, warnings,
+      threadId: thread.id, customerId: thread.customer.id, marker, warnings,
       ticket: { ticketId: thread.id, subject: thread.title.slice(0, 10000), description: source.slice(0, 10000) || 'No description provided.', logs: '', impact: 'single_user' },
     }];
   });
 }
 
-function buildPlainEvent(item, triageResult) {
+function buildPlainNote(item, triageResult) {
   if (triageResult.statusCode !== 200) throw new Error('Ticket validation failed: ' + triageResult.result.error);
   const r = triageResult.result;
   const sections = [
-    `Support triage — rules-v1\nCategory: ${r.category}\nSuggested priority: ${r.priority}\nHuman review required`,
+    item.marker,
+    `INTERNAL TRIAGE NOTES — rules-v1\nCategory: ${r.category}\nSuggested priority: ${r.priority}\nHuman review required`,
     'Input limitations\n' + item.warnings.join('\n'),
     'Reported issue\n' + r.ticket.subject + '\n' + r.ticket.description,
     'Findings\n' + (r.findings.map(f => `${f.category}: ${f.hypothesis}\nEvidence: ${f.evidence.join('\n')}`).join('\n\n') || 'No known error pattern matched.'),
@@ -64,24 +66,19 @@ function buildPlainEvent(item, triageResult) {
     'Escalation summary\n' + JSON.stringify(r.escalationSummary, null, 2),
     'Customer reply draft — review before sending\n' + r.customerReplyDraft,
   ];
-  // Plain text avoids interpreting customer text as Markdown or mentions.
-  const components = sections.flatMap(text => {
-    const chunks = [];
-    for (let i = 0; i < text.length; i += 10000) chunks.push({ componentPlainText: { plainText: text.slice(i, i + 10000) } });
-    return chunks;
-  });
-  return { query: CREATE_EVENT, variables: { input: {
-    threadId: item.threadId, externalId: item.externalId,
-    title: 'Support triage — rules-v1', components,
+  // createNote is team-only. Plain text avoids interpreting customer Markdown.
+  return { query: CREATE_NOTE, variables: { input: {
+    threadId: item.threadId, customerId: item.customerId,
+    text: sections.join('\n\n').replace(item.marker + '\n\n', item.marker + '\n'),
   } } };
 }
 
 function checkPlainWrite(response) {
   if (response.errors?.length) throw new Error('Plain mutation failed: ' + response.errors.map(e => e.message).join('; '));
-  const result = response.data?.createThreadEvent;
+  const result = response.data?.createNote;
   if (result?.error) throw new Error(`Plain write failed (${result.error.code}): ${result.error.message}`);
-  if (!result?.threadEvent?.id) throw new Error('Plain did not confirm event creation.');
-  return { status: 'triaged', eventId: result.threadEvent.id };
+  if (!result?.note?.id) throw new Error('Plain did not confirm internal note creation.');
+  return { status: 'triaged', noteId: result.note.id, visibility: 'internal' };
 }
 
-module.exports = { THREADS_QUERY, CREATE_EVENT, preparePlainThreads, buildPlainEvent, checkPlainWrite };
+module.exports = { THREADS_QUERY, CREATE_NOTE, preparePlainThreads, buildPlainNote, checkPlainWrite };

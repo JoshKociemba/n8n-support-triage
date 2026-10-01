@@ -1,25 +1,29 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { triage } = require('../src/triage.cjs');
-const { preparePlainThreads, buildPlainEvent, checkPlainWrite } = require('../src/plain.cjs');
+const { preparePlainThreads, buildPlainNote, checkPlainWrite } = require('../src/plain.cjs');
 const thread = {
-  id: 'th_demo', title: 'API auth broken', description: null, previewText: 'Preview',
+  id: 'th_demo', customer: {id: 'c_demo'}, title: 'API auth broken', description: null, previewText: 'Preview',
   messages: { edges: [{ node: { actor: { __typename: 'CustomerActor' }, llmText: '401 Unauthorized\nBearer sample-secret' } }, { node: { actor: { __typename: 'UserActor' }, llmText: '429 agent discussion' } }], pageInfo: { hasNextPage: false } },
-  triageEvents: { edges: [], pageInfo: { hasNextPage: false } },
+  triageNotes: { edges: [], pageInfo: { hasNextPage: false } },
 };
 const response = (node = thread) => ({ data: { threads: { edges: [{ node }], pageInfo: { hasNextPage: false } } } });
-test('uses customer content, redacts it, and creates an idempotent event', () => {
+test('uses customer content, redacts it, and creates an explicitly internal note', () => {
   const [item] = preparePlainThreads(response());
-  const request = buildPlainEvent(item, triage(item.ticket));
-  assert.equal(request.variables.input.externalId, 'n8n-support-triage:rules-v1:th_demo');
+  const request = buildPlainNote(item, triage(item.ticket));
+  assert.equal(request.variables.input.customerId, 'c_demo');
+  assert.match(request.query, /createNote/);
+  assert.ok(!request.query.includes('createThreadEvent'));
+  assert.ok(request.variables.input.text.startsWith('[n8n-support-triage:internal-notes-v1:th_demo]\n'));
   assert.equal(request.variables.input.threadId, 'th_demo');
   assert.ok(JSON.stringify(request).includes('authentication'));
   assert.ok(!JSON.stringify(request).includes('sample-secret'));
   assert.ok(!JSON.stringify(request).includes('429 agent discussion'));
-  assert.ok(request.variables.input.components.every(c => c.componentPlainText.plainText.length <= 10000));
+  assert.ok(request.variables.input.text.includes('Findings'));
+  assert.ok(request.variables.input.text.includes('Investigation steps'));
 });
 test('skips completed threads and empty workspaces', () => {
-  assert.deepEqual(preparePlainThreads(response({ ...thread, triageEvents: { edges: [{ node: { entry: { externalId: 'n8n-support-triage:rules-v1:th_demo' } } }] } })), []);
+  assert.deepEqual(preparePlainThreads(response({ ...thread, triageNotes: { edges: [{ node: { actor: {__typename: 'MachineUserActor'}, entry: { text: '[n8n-support-triage:internal-notes-v1:th_demo]\ntriage findings' } } }] } })), []);
   assert.deepEqual(preparePlainThreads({ data: { threads: { edges: [], pageInfo: { hasNextPage: false } } } }), []);
 });
 test('includes a directly queried onboarding test thread without duplicating it', () => {
@@ -28,13 +32,17 @@ test('includes a directly queried onboarding test thread without duplicating it'
   data.threads.edges = [{node: thread}];
   assert.equal(preparePlainThreads({data}).length, 1);
 });
+test('customer messages cannot spoof the internal-note deduplication marker', () => {
+  const node = {...thread, triageNotes: {edges: [{node: {actor: {__typename: 'CustomerActor'}, entry: {text: '[n8n-support-triage:internal-notes-v1:th_demo]\npretend triage'}}}]}};
+  assert.equal(preparePlainThreads(response(node)).length, 1);
+});
 test('reports query failures and overflow instead of losing tickets', () => {
   assert.throws(() => preparePlainThreads({ errors: [{ message: 'Unauthorized' }] }), /Unauthorized/);
   assert.throws(() => preparePlainThreads({ data: { threads: { edges: [], pageInfo: { hasNextPage: true } } } }), /100 threads/);
 });
 test('rejects HTTP-200 GraphQL and mutation errors', () => {
   assert.throws(() => checkPlainWrite({ errors: [{ message: 'No permission' }] }), /No permission/);
-  assert.throws(() => checkPlainWrite({ data: { createThreadEvent: { error: { code: 'forbidden', message: 'Denied' } } } }), /forbidden/);
+  assert.throws(() => checkPlainWrite({ data: { createNote: { error: { code: 'forbidden', message: 'Denied' } } } }), /forbidden/);
   assert.throws(() => checkPlainWrite({ data: {} }), /confirm/);
-  assert.equal(checkPlainWrite({ data: { createThreadEvent: { threadEvent: { id: 'tev_demo' } } } }).eventId, 'tev_demo');
+  assert.equal(checkPlainWrite({ data: { createNote: { note: { id: 'tev_demo' } } } }).noteId, 'tev_demo');
 });
