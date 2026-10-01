@@ -1,0 +1,7 @@
+{
+  "ticketId": "DEMO-101",
+  "subject": "API request fails after credential rotation",
+  "description": "A scheduled workflow stopped working after we rotated its API key. The request returns 401 Unauthorized.",
+  "impact": "multiple_users",
+  "logs": "2026-10-01T18:00:00Z ERROR HTTP 401 Unauthorized request_id=demo-101\nAuthorization: Bearer synthetic-demo-token\nuser=demo@example.com"
+}

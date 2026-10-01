@@ -1,0 +1,7 @@
+{
+  "ticketId": "DEMO-102",
+  "subject": "All customer syncs are failing",
+  "description": "Every sync receives a 503 Service Unavailable response from the upstream API.",
+  "impact": "outage",
+  "logs": "2026-10-01T18:05:00Z ERROR HTTP 503 Service Unavailable request_id=demo-102"
+}

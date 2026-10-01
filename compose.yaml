@@ -1,0 +1,28 @@
+name: n8n-support-triage
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.41.5
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      TZ: America/Los_Angeles
+      GENERIC_TIMEZONE: America/Los_Angeles
+      N8N_HOST: localhost
+      N8N_PROTOCOL: http
+      N8N_PORT: "5678"
+      WEBHOOK_URL: http://localhost:5678/
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "168"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5678/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+volumes:
+  n8n_data:

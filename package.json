@@ -1,0 +1,8 @@
+{
+  "name": "n8n-support-triage-demo",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build-workflow.cjs",
+    "test": "node --test tests/triage.test.cjs"
+  }
+}
