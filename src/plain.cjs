@@ -26,6 +26,23 @@ const CREATE_NOTE = `mutation SupportTriageNote($input: CreateNoteInput!) {
   }
 }`;
 
+const THREAD_QUERY = `query SupportTriageThread($threadId: ID!) { thread(threadId: $threadId) { ${THREAD_FIELDS} } }`;
+
+function normalizePlainCreation(event, workspaceId) {
+  if (!event || event.type !== 'thread.thread_created') throw new Error('Expected a Plain thread.thread_created event.');
+  if (!workspaceId || event.workspaceId !== workspaceId) throw new Error('Unexpected Plain workspace.');
+  if (typeof event.id !== 'string' || !event.id.startsWith('pEv_')) throw new Error('Missing Plain event ID.');
+  const threadId = event.payload?.thread?.id;
+  if (typeof threadId !== 'string' || !threadId.startsWith('th_')) throw new Error('Missing Plain thread ID.');
+  return {threadId, eventId: event.id};
+}
+
+function preparePlainThread(response) {
+  if (response.errors?.length) throw new Error('Plain query failed: ' + response.errors.map(e => e.message).join('; '));
+  if (!response.data?.thread) throw new Error('Created thread is not yet available from Plain.');
+  return preparePlainThreads({data: {threads: {edges: [], pageInfo: {hasNextPage: false}}, testThread: response.data.thread}});
+}
+
 function preparePlainThreads(response) {
   if (response.errors?.length) throw new Error('Plain query failed: ' + response.errors.map(e => e.message).join('; '));
   const connection = response.data?.threads;
@@ -81,4 +98,4 @@ function checkPlainWrite(response) {
   return { status: 'triaged', noteId: result.note.id, visibility: 'internal' };
 }
 
-module.exports = { THREADS_QUERY, CREATE_NOTE, preparePlainThreads, buildPlainNote, checkPlainWrite };
+module.exports = { THREADS_QUERY, THREAD_QUERY, CREATE_NOTE, normalizePlainCreation, preparePlainThread, preparePlainThreads, buildPlainNote, checkPlainWrite };

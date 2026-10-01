@@ -2,12 +2,25 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { triage } = require('../src/triage.cjs');
 const { preparePlainThreads, buildPlainNote, checkPlainWrite } = require('../src/plain.cjs');
+const {normalizePlainCreation, preparePlainThread} = require('../src/plain.cjs');
 const thread = {
   id: 'th_demo', customer: {id: 'c_demo'}, title: 'API auth broken', description: null, previewText: 'Preview',
   messages: { edges: [{ node: { actor: { __typename: 'CustomerActor' }, llmText: '401 Unauthorized\nBearer sample-secret' } }, { node: { actor: { __typename: 'UserActor' }, llmText: '429 agent discussion' } }], pageInfo: { hasNextPage: false } },
   triageNotes: { edges: [], pageInfo: { hasNextPage: false } },
 };
 const response = (node = thread) => ({ data: { threads: { edges: [{ node }], pageInfo: { hasNextPage: false } } } });
+test('accepts creation events for either ticket kind and checks workspace and IDs', () => {
+  for (const isTestThread of [true, false]) {
+    const event = {id: 'pEv_demo', workspaceId: 'w_demo', type: 'thread.thread_created', payload: {thread: {id: 'th_demo', isTestThread}}};
+    assert.equal(normalizePlainCreation(event, 'w_demo').threadId, 'th_demo');
+    assert.throws(() => normalizePlainCreation(event, 'w_other'), /workspace/);
+    assert.throws(() => normalizePlainCreation({...event, type: 'thread.note_created'}, 'w_demo'), /thread_created/);
+  }
+});
+test('direct lookup prepares both ticket kinds and fails if the thread is unavailable', () => {
+  for (const isTestThread of [true, false]) assert.equal(preparePlainThread({data: {thread: {...thread, isTestThread}}}).length, 1);
+  assert.throws(() => preparePlainThread({data: {thread: null}}), /not yet available/);
+});
 test('uses customer content, redacts it, and creates an explicitly internal note', () => {
   const [item] = preparePlainThreads(response());
   const request = buildPlainNote(item, triage(item.ticket));
