@@ -25,7 +25,7 @@ Listen again before sending another test request. Once you publish/activate the 
 
 ## Plain integration: new-ticket webhooks
 
-The active integration is `workflows/plain-ticket-created.json`. Plain sends a `thread.thread_created` event whenever a customer or onboarding test ticket is created. The workflow validates the workspace and ticket ID, waits five seconds for the opening message, fetches the ticket directly, and writes a team-only note with findings, evidence, investigation steps, escalation context, and a reply draft for review.
+The active integration is `workflows/plain-ticket-created.json`. Plain sends a `thread.thread_created` event whenever a customer or onboarding test ticket is created. The workflow validates the workspace and ticket ID, fetches the ticket directly and polls every five seconds for up to one minute until customer-authored message text is available, then writes a team-only Markdown note with bold section titles, bulleted findings and investigation steps, a readable escalation summary, and a reply draft for review. A plain-text version is included for fallback and deduplication.
 
 No ticket IDs need to be entered. Direct lookup supports onboarding tickets that Plain excludes from its normal thread list. Only the creation event is subscribed, so posting the internal note does not trigger another triage run. The old polling workflow should remain unpublished.
 
@@ -36,6 +36,7 @@ Keep these keys in the Git-ignored `.env` file:
 ```dotenv
 N8N_API_KEY=your_n8n_key
 PLAIN_API_KEY=your_plain_key
+TAVILY_API_KEY=your_tavily_key
 ```
 
 The Plain machine-user key needs `thread:read`, `customer:read`, `note:create`, `webhookTarget:create`, `webhookTarget:read`, and `webhookTarget:edit`. The n8n key must allow creating credentials and creating, updating, and activating workflows.
@@ -77,7 +78,45 @@ The tunnel reaches an Nginx proxy exposing only POST `/webhook/plain-ticket-crea
 
 Production executions are queued one at a time with `N8N_CONCURRENCY_PRODUCTION_LIMIT=1`. Each note has a stable marker that is checked before writing. Repeated deliveries receive HTTP 200 with `already_triaged`. Plain retries failed deliveries; note creation itself is not blindly retried after an ambiguous HTTP failure. Keep the polling workflow disabled and avoid overlapping manual runs, which bypass production concurrency limits.
 
+### Web research
+
+The webhook workflow adds **Triage ticket and prepare search → Search issue on the web → Attach web evidence** before building the internal note. Add `TAVILY_API_KEY` to `.env`, rebuild, and run `python3 scripts/manage-webhook.py update`. The script creates a domain-restricted encrypted n8n search credential and preserves it on future updates.
+
+Each new ticket makes one basic [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search) request, limited to three official documentation results and a 10-second timeout. Queries contain only recognized product names, known error tokens, and rule categories; free-form titles, message bodies, logs, and customer identifiers are not sent. If no supported product is named, the query defaults to n8n documentation. Extend the vendor allowlist in `src/search.cjs` for additional products.
+
+Notes include linked titles, search snippets, the query, and search time. These are supporting references, not verified diagnoses or page-level analysis. No AI-generated search answer or raw page content is requested. Failed or empty searches are disclosed in the note and do not block triage. Duplicate tickets skip the search as well as the note write. The optional polling demo does not perform web research.
+
+### Local issue-specific research summary
+
+After search, **Prepare issue-specific summary → Have web evidence? → Summarize findings for customer issue → Validate cited summary** relates the snippets to the customer issue. The note leads with the issue-specific analysis, possible explanations, checks to distinguish causes, and uncertainty. The reference section contains source links instead of copied snippets.
+
+Run [Ollama](https://docs.ollama.com/capabilities/structured-outputs) natively on your Mac to use Apple Silicon acceleration:
+
+```sh
+brew install ollama
+brew services start ollama
+ollama pull qwen3:4b
+```
+
+The default model is `qwen3:4b` (about 2.5 GB). Set `OLLAMA_MODEL` in `.env` to use another installed local model, then rebuild and run `python3 scripts/manage-webhook.py update`. The n8n container connects to `http://host.docker.internal:11434/api/chat`. Ollama's default service listens on localhost; it is not exposed through the public webhook tunnel. Ollama must keep running for summaries to work.
+
+Summarization runs locally, with no API key or per-request model charge. Only the existing Tavily search uses an external service and its account quota; the search query still excludes free-form customer text. The redacted subject and body plus up to three snippets are sent to the local model. Internal ticket/customer IDs are excluded. Redaction is best effort.
+
+Ollama receives a JSON schema, with streaming and thinking disabled and temperature zero. Local validation requires source IDs to refer to the actual results. Citations come from the stored source URLs, not model-generated URLs. Generated prose is escaped for Markdown and redacted again. No paid-model fallback is configured.
+
+No model call is made when search returns no usable evidence. The model has no tools or write access. Empty, incomplete, malformed, or uncited responses are disclosed in the note; rule-based triage still continues. This remains human-reviewed analysis of snippets, not a verified diagnosis. Local summarization has a 20-second timeout and no automatic retry. Model loading or a busy Mac can exceed that timeout; preload the model with `ollama run qwen3:4b "Reply with OK."` after restarting if needed.
+
+References: [Ollama structured outputs](https://docs.ollama.com/capabilities/structured-outputs), [Qwen3 4B](https://ollama.com/library/qwen3:4b).
+
+### Ticket-type routing
+
+The rules distinguish technical incidents, billing questions, and general questions. Billing and general questions do not receive generic reproduction/version/execution-ID requests. Their notes omit the empty “Information still needed” section and the technical impact warning. Billing queries search official billing/pricing references, and account-specific charges or refunds require billing-team review. An “unauthorized charge” is treated as billing; a reported API authentication error remains technical.
+
+The local model receives the ticket type so its suggested checks stay relevant. All reply drafts still require review. This is conservative rule-based routing: ambiguous wording may need manual correction. No automatic billing changes or customer replies are sent.
+
 ### Scope and limits
+
+- A title, description, preview, or agent message alone does not satisfy the opening-message check. If no customer text arrives within one minute, the execution fails without creating a note so Plain can retry. API errors also fail visibly. Existing triage notes are acknowledged immediately.
 
 - The note contains rule-based hypotheses and requires human review. Customer impact is unknown, so the note discloses the single-user priority default.
 - The workflow reads the first 20 message entries, retains customer-authored text, and caps source text at 10000 characters. Missing text or truncation is disclosed. Attachments are not downloaded.

@@ -28,3 +28,22 @@ test('unknown cases ask for evidence and outages recommend escalation', () => {
   assert.equal(outage.priority, 'high');
   assert.equal(outage.escalationSummary.escalationRecommended, true);
 });
+
+test('billing and general questions avoid technical troubleshooting requests', () => {
+  for (const description of ['Why was I charged twice this month?', 'There is an unauthorized charge on my invoice.']) {
+    const result = triage({...ticket, subject: 'Billing question', description, logs: '', impact: 'single_user'}).result;
+    assert.equal(result.ticketType, 'billing');
+    assert.equal(result.category, 'billing');
+    assert.deepEqual(result.escalationSummary.missingInformation, []);
+    assert.ok(!JSON.stringify(result.nextSteps).includes('reproduction'));
+    assert.ok(!result.customerReplyDraft.includes('version'));
+    assert.ok(!result.customerReplyDraft.includes('execution ID'));
+    assert.ok(result.customerReplyDraft.includes('billing question'));
+  }
+  const general = triage({...ticket, subject: 'Product question', description: 'Where can I find the getting started guide?', logs: ''}).result;
+  assert.equal(general.ticketType, 'general');
+  assert.deepEqual(general.escalationSummary.missingInformation, []);
+  const technical = triage({...ticket, subject: 'API fails after subscription change', description: '401 Unauthorized', logs: ''}).result;
+  assert.equal(technical.ticketType, 'technical');
+  assert.equal(technical.category, 'authentication');
+});

@@ -33,11 +33,27 @@ def plain(query, variables=None):
         raise SystemExit(1)
     return result['data']
 
+def search_credential(state):
+    if state.get('searchCredentialId'):
+        return {'id': state['searchCredentialId'], 'name': 'Tavily support research'}
+    key = keys.get('TAVILY_API_KEY')
+    if not key:
+        raise SystemExit('Add TAVILY_API_KEY to .env before deploying the web-search workflow. The existing workflow has not been changed.')
+    credential = api.request(api.N8N + '/credentials', 'POST', {
+        'name': 'Tavily support research', 'type': 'httpHeaderAuth',
+        'data': {'name': 'Authorization', 'value': 'Bearer ' + key,
+                 'allowedHttpRequestDomains': 'domains', 'allowedDomains': 'api.tavily.com'},
+    })
+    state['searchCredentialId'] = credential['id']
+    save(state)
+    return {'id': credential['id'], 'name': 'Tavily support research'}
+
 mode = sys.argv[1] if len(sys.argv) > 1 else 'status'
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
 if mode == 'install':
     if state.get('workflowId'):
         raise SystemExit('Webhook workflow already installed; use register to synchronize its URL.')
+    search_auth = search_credential(state)
     token = secure.token_urlsafe(48)
     credential = api.request(api.N8N + '/credentials', 'POST', {'name': 'Plain webhook ingress', 'type': 'httpHeaderAuth', 'data': {'name': 'X-Triage-Webhook-Token', 'value': token}})
     state.update({'ingressCredentialId': credential['id'], 'ingressToken': token})
@@ -46,10 +62,15 @@ if mode == 'install':
     plain_credential = api.request(api.N8N + '/credentials', 'POST', {'name': 'Plain test workspace', 'type': 'httpHeaderAuth', 'data': {'name': 'Authorization', 'value': 'Bearer ' + keys['PLAIN_API_KEY'], 'allowedHttpRequestDomains': 'domains', 'allowedDomains': 'core-api.uk.plain.com'}})
     workflow = json.loads((root / 'workflows/plain-ticket-created.json').read_text())
     for node in workflow['nodes']:
-        if node['type'] == 'n8n-nodes-base.httpRequest':
+        if node['name'] == 'Summarize findings for customer issue':
+            node.pop('credentials', None)
+        elif node['name'] == 'Search issue on the web':
+            node['credentials'] = {'httpHeaderAuth': search_auth}
+        elif node['type'] == 'n8n-nodes-base.httpRequest':
             node['credentials'] = {'httpHeaderAuth': {'id': plain_credential['id'], 'name': 'Plain test workspace'}}
         if node['type'] == 'n8n-nodes-base.webhook':
             node['credentials'] = {'httpHeaderAuth': {'id': credential['id'], 'name': 'Plain webhook ingress'}}
+        if node['name'] == 'Prepare issue-specific summary': node['parameters']['jsCode'] = node['parameters']['jsCode'].replace('SET_SUMMARY_MODEL', keys.get('OLLAMA_MODEL', 'qwen3:4b'))
         if node['name'] == 'Validate Plain creation event':
             node['parameters']['jsCode'] = node['parameters']['jsCode'].replace('SET_WORKSPACE_ID', workspace)
     payload = {k: workflow[k] for k in ['name', 'nodes', 'connections', 'settings']}
@@ -59,11 +80,15 @@ if mode == 'install':
     api.request(api.N8N + '/workflows/' + state['workflowId'] + '/activate', 'POST', {})
     print('Webhook workflow installed and active:', state['workflowId'])
 elif mode == 'update':
+    search_auth = search_credential(state)
     current = api.request(api.N8N + '/workflows/' + state['workflowId'])
     workflow = json.loads((root / 'workflows/plain-ticket-created.json').read_text())
     credentials = {n['name']: n.get('credentials') for n in current['nodes'] if n.get('credentials')}
     for node in workflow['nodes']:
         if node['name'] in credentials: node['credentials'] = credentials[node['name']]
+        if node['name'] == 'Search issue on the web': node['credentials'] = {'httpHeaderAuth': search_auth}
+        if node['name'] == 'Summarize findings for customer issue': node.pop('credentials', None)
+        if node['name'] == 'Prepare issue-specific summary': node['parameters']['jsCode'] = node['parameters']['jsCode'].replace('SET_SUMMARY_MODEL', keys.get('OLLAMA_MODEL', 'qwen3:4b'))
         if node['name'] == 'Validate Plain creation event': node['parameters']['jsCode'] = node['parameters']['jsCode'].replace('SET_WORKSPACE_ID', state['workspaceId'])
     api.request(api.N8N + '/workflows/' + state['workflowId'] + '/deactivate', 'POST', {})
     api.request(api.N8N + '/workflows/' + state['workflowId'], 'PUT', {k: workflow[k] for k in ['name', 'nodes', 'connections', 'settings']})

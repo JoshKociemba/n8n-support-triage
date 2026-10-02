@@ -43,21 +43,42 @@ function triage(body) {
   ];
   const source = `${ticket.subject}\n${ticket.description}\n${ticket.logs}`;
   const matches = rules.filter(rule => rule.pattern.test(source));
-  const findings = matches.map(rule => ({
+  let findings = matches.map(rule => ({
     category: rule.category,
     hypothesis: rule.hypothesis,
     evidence: source.split('\n').filter(line => rule.pattern.test(line)).slice(0, 3).map(line => line.slice(0, 500)),
     nextSteps: rule.steps,
   }));
+  const isBilling = /\b(?:billing|invoice|refund|payment|subscription|pricing|charge|charged|charges|plan|renewal|credit balance|upgrade|downgrade)\b/i.test(source);
+  // An unauthorized charge is a billing issue, not an API authentication error.
+  const hasTechnicalContext = /\b(?:api|http|workflow|node|webhook|integration|credential|execution|ETIMEDOUT|ECONNREFUSED|ENOTFOUND)\b|\b(?:401|403|429|500|502|503|504)\s+(?:unauthorized|forbidden|too many|internal|bad gateway|service unavailable)/i.test(source);
+  if (isBilling && !hasTechnicalContext) findings = [];
+  const ticketType = findings.length ? 'technical' : isBilling ? 'billing' :
+    /\b(?:workflow|node|api|webhook|integration|error|bug|fail(?:s|ed|ure)?|crash|execution|credential|unexpected behavior)\b/i.test(source) ? 'technical' : 'general';
   const primary = findings[0];
   const nextSteps = [...new Set(findings.flatMap(f => f.nextSteps))];
-  if (!primary) nextSteps.push('Request exact reproduction steps, expected behavior, actual behavior, and timestamp with timezone.', 'Collect a sanitized error message and execution ID.');
+  if (!primary) {
+    if (ticketType === 'billing') nextSteps.push(
+      'Review the billing question and the customer account information already available in Plain.',
+      'Use official pricing or billing documentation for general policy questions; verify account-specific charges, invoices, or refunds with the billing team.',
+      'Ask a targeted follow-up only if a specific detail needed to answer the question is missing. Do not request payment card details.'
+    );
+    else if (ticketType === 'technical') nextSteps.push('Request exact reproduction steps, expected behavior, actual behavior, and timestamp with timezone.', 'Collect a sanitized error message and execution ID.');
+    else nextSteps.push('Review the question and any relevant product documentation.', 'Ask a targeted clarification only if the customer request is unclear.');
+  }
+  const missingInformation = ticketType === 'technical' ? ['Reproduction steps', 'Expected behavior', 'Affected version', 'Timestamp and execution ID'] : [];
+  const customerReplyDraft = ticketType === 'billing'
+    ? "Thanks for your billing question. We'll review the details in your message and check the relevant billing information."
+    : ticketType === 'general'
+      ? "Thanks for reaching out. We'll review your question and get back to you with the relevant information."
+      : `Thanks for reporting this. ${primary ? 'The information provided contains signals related to ' + primary.category.replace(/_/g, ' ') + '. We need to verify the cause.' : 'We need a little more information to investigate.'} Please share the exact reproduction steps, the affected version, and the timestamp with timezone. Please remove credentials and personal information from any logs you send.`;
   const priority = ticket.impact === 'outage' ? 'high' : ticket.impact === 'multiple_users' ? 'medium' : 'normal';
   return { statusCode: 200, result: {
     ticket,
-    category: primary?.category || 'needs_investigation',
+    category: primary?.category || (ticketType === 'technical' ? 'needs_investigation' : ticketType),
+    ticketType,
     priority,
-    method: 'rules-v1',
+    method: 'rules-v2',
     findings,
     nextSteps,
     requiresHumanReview: true,
@@ -66,10 +87,10 @@ function triage(body) {
       reportedBehavior: ticket.description,
       impact: ticket.impact,
       hypotheses: findings.map(f => f.hypothesis),
-      missingInformation: ['Reproduction steps', 'Expected behavior', 'Affected version', 'Timestamp and execution ID'],
+      missingInformation,
       escalationRecommended: ticket.impact === 'outage',
     },
-    customerReplyDraft: `Thanks for reporting this. ${primary ? 'The information provided contains signals related to ' + primary.category.replace(/_/g, ' ') + '. We need to verify the cause.' : 'We need a little more information to investigate.'} Please share the exact reproduction steps, the affected version, and the timestamp with timezone. Please remove credentials and personal information from any logs you send.`,
+    customerReplyDraft,
   } };
 }
 
