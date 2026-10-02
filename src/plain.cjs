@@ -28,6 +28,7 @@ const CREATE_NOTE = `mutation SupportTriageNote($input: CreateNoteInput!) {
 
 const THREAD_QUERY = `query SupportTriageThread($threadId: ID!) { thread(threadId: $threadId) { ${THREAD_FIELDS} } }`;
 
+/** Validate a creation event against the configured workspace before fetching its thread. */
 function normalizePlainCreation(event, workspaceId) {
   if (!event || event.type !== 'thread.thread_created') throw new Error('Expected a Plain thread.thread_created event.');
   if (!workspaceId || event.workspaceId !== workspaceId) throw new Error('Unexpected Plain workspace.');
@@ -37,12 +38,14 @@ function normalizePlainCreation(event, workspaceId) {
   return {threadId, eventId: event.id};
 }
 
+/** Return polling readiness; throw at the deadline so Plain can retry without a premature note. */
 function checkPlainOpeningMessage(response, deadline, now = Date.now()) {
   if (response.errors?.length) throw new Error('Plain query failed: ' + response.errors.map(e => e.message).join('; '));
   const thread = response.data?.thread;
   if (thread) {
     // Deduplication can finish immediately, even if the original message was removed.
     if (!preparePlainThread(response).length) return {...response, ready: true};
+    // Creation can arrive before the first message; previews and agent text do not prove readiness.
     const hasBody = thread.messages?.edges?.some(({node}) =>
       node.actor?.__typename === 'CustomerActor' && typeof node.llmText === 'string' && node.llmText.trim().length > 0);
     if (hasBody) return {...response, ready: true};
@@ -52,12 +55,14 @@ function checkPlainOpeningMessage(response, deadline, now = Date.now()) {
   return {...response, ready: false};
 }
 
+/** Adapt a direct thread lookup to the shared normalizer, including onboarding test threads. */
 function preparePlainThread(response) {
   if (response.errors?.length) throw new Error('Plain query failed: ' + response.errors.map(e => e.message).join('; '));
   if (!response.data?.thread) throw new Error('Created thread is not yet available from Plain.');
   return preparePlainThreads({data: {threads: {edges: [], pageInfo: {hasNextPage: false}}, testThread: response.data.thread}});
 }
 
+/** Normalize thread responses into bounded triage inputs, omitting already-triaged threads. */
 function preparePlainThreads(response) {
   if (response.errors?.length) throw new Error('Plain query failed: ' + response.errors.map(e => e.message).join('; '));
   const connection = response.data?.threads;
@@ -67,7 +72,9 @@ function preparePlainThreads(response) {
   if (response.data.testThread && !edges.some(e => e.node.id === response.data.testThread.id)) edges.push({node: response.data.testThread});
   return edges.flatMap(({ node: thread }) => {
     const marker = `[n8n-support-triage:internal-notes-v1:${thread.id}]`;
+    // An incomplete note list cannot establish that a previous triage note is absent.
     if (thread.triageNotes?.pageInfo?.hasNextPage) throw new Error('Too many notes to check deduplication for ' + thread.id);
+    // Require a machine-authored marker so customer text cannot suppress triage.
     if (thread.triageNotes?.edges?.some(e => e.node.actor?.__typename === 'MachineUserActor' && e.node.entry.text?.startsWith(marker + '\n'))) return [];
     if (!thread.customer?.id) throw new Error('Missing customer ID for ' + thread.id);
     const messages = (thread.messages?.edges || [])
@@ -85,6 +92,7 @@ function preparePlainThreads(response) {
   });
 }
 
+/** Build a createNote mutation with readable Markdown and a stable plain-text deduplication marker. */
 function buildPlainNote(item, triageResult) {
   if (triageResult.statusCode !== 200) throw new Error('Ticket validation failed: ' + triageResult.result.error);
   const r = triageResult.result;
@@ -133,6 +141,7 @@ function buildPlainNote(item, triageResult) {
     }
     if (item.researchSummary) {
       const summary = item.researchSummary;
+      // Citation IDs were validated upstream; resolve URLs from search results, never model prose.
       const cite = ids => ids.map(id => {
         const source = item.webResearch.results[Number(id.slice(1)) - 1];
         const url = source.url.replace(/[()]/g, c => c === '(' ? '%28' : '%29');
@@ -157,6 +166,7 @@ function buildPlainNote(item, triageResult) {
   } } };
 }
 
+/** Require confirmed note creation; GraphQL can report a failed write with HTTP 200. */
 function checkPlainWrite(response) {
   if (response.errors?.length) throw new Error('Plain mutation failed: ' + response.errors.map(e => e.message).join('; '));
   const result = response.data?.createNote;

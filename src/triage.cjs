@@ -1,5 +1,6 @@
 // Embedded in the n8n Code node by scripts/build-plain-webhook.cjs.
 // Keep this function dependency-free so it runs in n8n's task runner.
+/** Return validated, redacted triage suggestions; malformed tickets return a 400 result. */
 function triage(body) {
   const fail = (message) => ({ statusCode: 400, result: { error: message } });
   if (!body || typeof body !== 'object' || Array.isArray(body)) return fail('Expected a JSON object.');
@@ -55,6 +56,7 @@ function triage(body) {
   if (isBilling && !hasTechnicalContext) findings = [];
   const ticketType = findings.length ? 'technical' : isBilling ? 'billing' :
     /\b(?:workflow|node|api|webhook|integration|error|bug|fail(?:s|ed|ure)?|crash|execution|credential|unexpected behavior)\b/i.test(source) ? 'technical' : 'general';
+  // Rule order selects the main category while retaining other matches as hypotheses.
   const primary = findings[0];
   const nextSteps = [...new Set(findings.flatMap(f => f.nextSteps))];
   if (!primary) {
@@ -66,6 +68,7 @@ function triage(body) {
     else if (ticketType === 'technical') nextSteps.push('Request exact reproduction steps, expected behavior, actual behavior, and timestamp with timezone.', 'Collect a sanitized error message and execution ID.');
     else nextSteps.push('Review the question and any relevant product documentation.', 'Ask a targeted clarification only if the customer request is unclear.');
   }
+  // Public research gaps alone do not justify technical follow-ups for billing/general requests.
   const missingInformation = ticketType === 'technical' ? ['Reproduction steps', 'Expected behavior', 'Affected version', 'Timestamp and execution ID'] : [];
   const customerReplyDraft = ticketType === 'billing'
     ? "Thanks for your billing question. We'll review the details in your message and check the relevant billing information."

@@ -4,7 +4,9 @@ const {triage} = require('../src/triage.cjs');
 const {THREAD_QUERY, CREATE_NOTE, normalizePlainCreation, checkPlainOpeningMessage, preparePlainThread, preparePlainThreads, buildPlainNote, checkPlainWrite} = require('../src/plain.cjs');
 const {prepareWebSearch, attachWebEvidence} = require('../src/search.cjs');
 const {prepareResearchSummary, attachResearchSummary} = require('../src/summary.cjs');
+// Functions are serialized with toString(); their runtime dependencies must be embedded too.
 const code = (id, name, x, jsCode) => ({id, name, position: [x, 0], type: 'n8n-nodes-base.code', typeVersion: 2, parameters: {mode: 'runOnceForAllItems', jsCode}});
+// Retry reads only: retrying an unconfirmed note write could create duplicate notes.
 const http = (id, name, x, jsonBody, retryOnFail) => ({id, name, position: [x, 0], type: 'n8n-nodes-base.httpRequest', typeVersion: 4.2, retryOnFail, maxTries: 3, waitBetweenTries: 2000,
   parameters: {method: 'POST', url: 'https://core-api.uk.plain.com/graphql/v1', authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth', sendBody: true, specifyBody: 'json', jsonBody, options: {timeout: 20000}}
 });
@@ -43,6 +45,7 @@ connect('Validate Plain creation event', 'Fetch created Plain ticket');
 connect('Fetch created Plain ticket', 'Check opening message');
 connect('Check opening message', 'Opening message ready?');
 connections['Opening message ready?'] = {main: [route('Skip existing internal triage note'), route('Wait before checking again')]};
+// The deadline is created once at ingress, so this loop cannot extend it with each poll.
 connect('Wait before checking again', 'Fetch created Plain ticket');
 connect('Skip existing internal triage note', 'Already triaged?');
 connections['Already triaged?'] = {main: [route('Acknowledge Plain delivery'), route('Triage ticket and prepare search')]};
@@ -50,6 +53,7 @@ connect('Triage ticket and prepare search', 'Search issue on the web');
 connect('Search issue on the web', 'Attach web evidence');
 connect('Attach web evidence', 'Prepare issue-specific summary');
 connect('Prepare issue-specific summary', 'Have web evidence?');
+// The no-evidence branch still runs validation to produce an explicit summary fallback status.
 connections['Have web evidence?'] = {main: [route('Summarize findings for customer issue'), route('Validate cited summary')]};
 connect('Summarize findings for customer issue', 'Validate cited summary');
 connect('Validate cited summary', 'Triage and build internal note');

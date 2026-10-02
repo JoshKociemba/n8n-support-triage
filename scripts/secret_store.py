@@ -15,11 +15,13 @@ class SecretStoreError(RuntimeError):
     pass
 
 class KeychainStore:
+    """Store project secrets through a native helper with captured stdin/stdout pipes."""
     def __init__(self, root=ROOT):
         self.root = pathlib.Path(root)
         self.helper = self.root / '.local' / 'keychain-helper'
 
     def ensure_helper(self):
+        """Build the native bridge at a stable path for macOS Keychain access prompts."""
         if sys.platform != 'darwin':
             raise SecretStoreError('This secret store requires macOS Keychain.')
         source = self.root / 'scripts' / 'keychain-helper.swift'
@@ -33,6 +35,7 @@ class KeychainStore:
         self.helper.chmod(0o700)
 
     def _call(self, operation, account, value=None):
+        """Use a stdin request so secret values never appear in process arguments."""
         if not ACCOUNT_PATTERN.fullmatch(account):
             raise SecretStoreError('Invalid secret name.')
         self.ensure_helper()
@@ -40,6 +43,7 @@ class KeychainStore:
         if value is not None:
             request['value'] = value
         result = subprocess.run([str(self.helper)], input=json.dumps(request).encode(), capture_output=True)
+        # Only a missing item is optional; locked or denied access must not look like absence.
         if result.returncode == 44 and operation == 'get':
             return None
         if result.returncode:
@@ -47,9 +51,11 @@ class KeychainStore:
         return result.stdout.decode()
 
     def get(self, name):
+        """Return the secret for an uppercase account name, or None if no item exists."""
         return self._call('get', name)
 
     def set(self, name, value):
+        """Create or replace a named secret, rejecting empty values."""
         if not value:
             raise SecretStoreError('Empty secret rejected.')
         self._call('set', name, value)
@@ -57,12 +63,14 @@ class KeychainStore:
 STORE = KeychainStore()
 
 def get_secret(name, required=True):
+    """Read a Keychain item, raising setup guidance when a required secret is absent."""
     value = STORE.get(name)
     if required and not value:
         raise SecretStoreError('Missing ' + name + '. Run python3 scripts/manage-secrets.py set ' + name + '.')
     return value
 
 def load_config(root=ROOT):
+    """Read only allowlisted non-secret .env settings; never fall back to plaintext keys."""
     path = pathlib.Path(root) / '.env'
     config = {}
     if not path.exists():
@@ -78,7 +86,9 @@ def load_config(root=ROOT):
     return config
 
 def atomic_write(path, content):
+    """Replace one file atomically with owner-only permissions."""
     path = pathlib.Path(path)
+    # Create beside the destination so os.replace stays on the same filesystem.
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.' + path.name + '-')
     try:
         with os.fdopen(fd, 'w') as handle:
@@ -119,6 +129,7 @@ def migrate(root=ROOT, store=STORE):
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
     if state.get('ingressToken'):
         pending['PLAIN_WEBHOOK_TOKEN'] = state['ingressToken']
+    # Check every conflict before importing anything, preserving existing Keychain values.
     for name, value in pending.items():
         existing = store.get(name)
         if existing is not None and existing != value:
@@ -127,6 +138,7 @@ def migrate(root=ROOT, store=STORE):
         store.set(name, value)
         if store.get(name) != value:
             raise SecretStoreError('Keychain verification failed; no plaintext files were changed.')
+    # Both plaintext files stay intact until all imported values have passed a read-back check.
     if env.exists():
         atomic_write(env, ''.join(retained) or '# Non-secret settings only. API keys are stored in macOS Keychain.\n')
     if 'ingressToken' in state:

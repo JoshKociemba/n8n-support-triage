@@ -10,6 +10,7 @@ except SecretStoreError as error:
 # Keychain values are retrieved only when an operation needs them.
 
 def request(url, method='GET', data=None, plain=False):
+    """Call n8n or Plain with a Keychain key, reporting HTTP failures without response bodies."""
     headers = {'Content-Type': 'application/json', 'User-Agent': 'n8n-support-triage-demo/1.0'}
     headers['Authorization' if plain else 'X-N8N-API-KEY'] = ('Bearer ' if plain else '') + get_secret('PLAIN_API_KEY' if plain else 'N8N_API_KEY')
     req = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None, headers=headers, method=method)
@@ -24,11 +25,13 @@ state_path = root / '.plain-webhook-state.json'
 compose = ['docker', 'compose', '-f', 'compose.yaml', '-f', 'compose.webhooks.yaml']
 
 def save(state):
+    """Persist integration IDs and endpoint metadata while rejecting a legacy plaintext token."""
     if 'ingressToken' in state:
         raise SystemExit('Plaintext webhook token found; run scripts/manage-secrets.py migrate.')
     atomic_write(state_path, json.dumps(state) + '\n')
 
 def plain(query, variables=None):
+    """Execute Plain GraphQL and reject query errors even when the HTTP request succeeds."""
     result = api.request(api.PLAIN, 'POST', {'query': query, 'variables': variables or {}}, plain=True)
     if result.get('errors'):
         print('Plain GraphQL errors:', json.dumps(result['errors']))
@@ -36,6 +39,7 @@ def plain(query, variables=None):
     return result['data']
 
 def search_credential(state):
+    """Reuse the recorded n8n search credential or create one from the Keychain key."""
     if state.get('searchCredentialId'):
         return {'id': state['searchCredentialId'], 'name': 'Tavily support research'}
     key = get_secret('TAVILY_API_KEY')
@@ -85,6 +89,7 @@ elif mode == 'update':
     search_auth = search_credential(state)
     current = api.request(api.N8N + '/workflows/' + state['workflowId'])
     workflow = json.loads((root / 'workflows/plain-ticket-created.json').read_text())
+    # Exported nodes have no credentials; restore live bindings by their stable node names.
     credentials = {n['name']: n.get('credentials') for n in current['nodes'] if n.get('credentials')}
     for node in workflow['nodes']:
         if node['name'] in credentials: node['credentials'] = credentials[node['name']]
@@ -92,12 +97,14 @@ elif mode == 'update':
         if node['name'] == 'Summarize findings for customer issue': node.pop('credentials', None)
         if node['name'] == 'Prepare issue-specific summary': node['parameters']['jsCode'] = node['parameters']['jsCode'].replace('SET_SUMMARY_MODEL', keys.get('OLLAMA_MODEL', 'qwen3:4b'))
         if node['name'] == 'Validate Plain creation event': node['parameters']['jsCode'] = node['parameters']['jsCode'].replace('SET_WORKSPACE_ID', state['workspaceId'])
+    # n8n must activate the edited definition after the update for production deliveries.
     api.request(api.N8N + '/workflows/' + state['workflowId'] + '/deactivate', 'POST', {})
     api.request(api.N8N + '/workflows/' + state['workflowId'], 'PUT', {k: workflow[k] for k in ['name', 'nodes', 'connections', 'settings']})
     api.request(api.N8N + '/workflows/' + state['workflowId'] + '/activate', 'POST', {})
     print('Webhook workflow updated.')
 elif mode in ['register', 'sync']:
     logs = subprocess.check_output(compose + ['logs', '--no-color', 'webhook-tunnel'], cwd=root, text=True, stderr=subprocess.STDOUT)
+    # Logs retain older tunnel sessions; the latest hostname is the one to register.
     urls = re.findall(r'https://[a-z0-9-]+\.trycloudflare\.com', logs)
     if not urls: raise SystemExit('Tunnel URL not ready yet.')
     url = urls[-1] + '/webhook/plain-ticket-created'

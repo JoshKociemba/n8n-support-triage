@@ -1,4 +1,5 @@
 // Embedded in n8n Code nodes; never send free-form ticket text to the search API.
+/** Derive a public-token search request from validated triage, keeping customer text out of queries. */
 function prepareWebSearch(item, triageResult) {
   if (triageResult.statusCode !== 200) throw new Error('Cannot search an invalid ticket.');
   const ticket = triageResult.result.ticket;
@@ -16,7 +17,7 @@ function prepareWebSearch(item, triageResult) {
     ['PostgreSQL', /\bpostgres(?:ql)?\b/i, ['postgresql.org']],
   ].filter(([, pattern]) => pattern.test(source));
   if (!vendors.length) vendors.push(['n8n', null, ['docs.n8n.io']]);
-  // Match only known public error tokens, avoiding numbers from URLs or secrets.
+  // Restrict extracted tokens to this known error vocabulary; free-form numbers are never copied.
   const tokens = [...new Set(source.match(/\b(?:401|403|429|500|502|503|504|ETIMEDOUT|ECONNREFUSED|ENOTFOUND)\b/g) || [])].slice(0, 3);
   const categories = [...new Set(triageResult.result.findings.map(f => f.category.replace(/_/g, ' ')))];
   const query = [...vendors.map(([name]) => name), ...tokens, ...categories, triageResult.result.ticketType === 'billing' ? 'pricing billing policy' : triageResult.result.ticketType === 'general' ? 'product documentation' : 'troubleshooting'].join(' ');
@@ -27,6 +28,7 @@ function prepareWebSearch(item, triageResult) {
   }}};
 }
 
+/** Keep bounded, deduplicated official HTTPS references; record search failures without blocking triage. */
 function attachWebEvidence(item, response, now = new Date().toISOString()) {
   const base = {query: item.search.query, searchedAt: now, results: []};
   if (response?.error || !Array.isArray(response?.results)) {
@@ -39,6 +41,7 @@ function attachWebEvidence(item, response, now = new Date().toISOString()) {
       const match = typeof result.url === 'string' && /^https:\/\/([a-z0-9.-]+)(?::443)?(\/[^\s<>\\]*)?$/i.exec(result.url);
       if (!match) return [];
       const hostname = match[1].toLowerCase();
+      // Recheck returned hosts even though the request already asks the provider to restrict domains.
       if (!item.search.domains.some(domain => hostname === domain || hostname.endsWith('.' + domain))) return [];
       const url = 'https://' + hostname + (match[2] || '/').split('#')[0];
       if (seen.has(url)) return [];
