@@ -1,4 +1,4 @@
-// Embedded in the n8n Code node by scripts/build-workflow.cjs.
+// Embedded in the n8n Code node by scripts/build-plain-webhook.cjs.
 // Keep this function dependency-free so it runs in n8n's task runner.
 function triage(body) {
   const fail = (message) => ({ statusCode: 400, result: { error: message } });

@@ -2,3 +2,7 @@
 *.backup
 .DS_Store
 .plain-webhook-state.json
+
+.local/
+__pycache__/
+*.pyc
